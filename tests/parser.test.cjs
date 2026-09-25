@@ -1,0 +1,118 @@
+const assert = require('node:assert/strict');
+const { FIELDS, parse } = require('../parser.js');
+
+function tsv(rows) {
+  return 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n' + rows.map((row, i) =>
+    [5, 1, 1, 1, i + 1, 1, row[1], row[2], row[3] || 80, 20, row[4] === undefined ? 95 : row[4], row[0]].join('\t')
+  ).join('\n');
+}
+
+assert.equal(FIELDS.length, 30);
+assert.equal(new Set(FIELDS.map(field => field.key)).size, 30);
+const sample = parse(`給与明細 令和８年９月\n基本給 １２０，０００円\n役職手当 10,000\n支給合計 159,876\n控除合計 38,689\n振込支給額 121,187\n現金支給額 0\n勤務時間 157:30\n有休日数 0.5\n出勤日数 20\n普通残業 12,000\n休日深夜残業手当 3,000`);
+assert.equal(sample.values.month, '2026-09');
+assert.equal(sample.values.basePay, 120000);
+assert.equal(sample.values.gross, 159876);
+assert.equal(sample.values.deductions, 38689);
+assert.equal(sample.values.net, 121187);
+assert.equal(sample.values.cash, 0);
+assert.equal(sample.values.workHours, 157.5);
+assert.equal(sample.values.paidLeaveDays, 0.5);
+assert.equal(sample.values.attendanceDays, 20);
+assert.equal(sample.values.regularOvertime, 12000);
+assert.equal(sample.values.holidayNightOvertime, 3000);
+assert.equal(sample.values.nightOvertime, null);
+assert.ok(sample.detected.includes('cash'));
+assert.equal(sample.warnings.length, 0);
+
+const inline = parse('2026/09\n基 本 給：200,000 総 支 給 額：230,000 控 除 合 計：40,000 銀行振込額：190,000');
+assert.equal(inline.values.month, '2026-09');
+assert.equal(inline.values.basePay, 200000);
+assert.equal(inline.values.gross, 230000);
+assert.equal(inline.values.deductions, 40000);
+assert.equal(inline.values.net, 190000);
+
+assert.equal(parse('9月分 基本給 120,000').values.month, '');
+assert.equal(parse('令和元年5月 給与明細').values.month, '2019-05');
+assert.equal(parse('給与明細 R8.9').values.month, '2026-09');
+assert.equal(parse('支給年月 2026年9月\n勤怠 2026年8月').values.month, '2026-09');
+assert.equal(parse('2026年9月\n2026年8月').values.month, '');
+assert.equal(parse('2026年13月').values.month, '');
+
+const uncertain = parse('基本給 12O,OOO\n支給合計 123,45\n控除合計 3.52\n振込支給額 120,000 130,000\n勤務時間 12:99');
+assert.equal(uncertain.values.basePay, null);
+assert.equal(uncertain.values.gross, null);
+assert.equal(uncertain.values.deductions, null);
+assert.equal(uncertain.values.net, null);
+assert.equal(uncertain.values.workHours, null);
+assert.equal(parse('基本給 100 200').values.basePay, null);
+assert.equal(parse('基本給 20日').values.basePay, null);
+assert.equal(parse('基本給 200,000\n基本給 210,000').values.basePay, null);
+assert.equal(parse('所得税 ▲1,500').values.incomeTax, -1500);
+assert.equal(parse('出勤日数 99').values.attendanceDays, null);
+assert.equal(parse('基本給\n200,000').values.basePay, 200000);
+
+const table = tsv([
+  ['基本', 20, 20, 40], ['給', 60, 20, 20], ['役職手当', 200, 20, 90], ['支給合計', 370, 20, 90],
+  ['200,000', 20, 52], ['10,000', 210, 52], ['230,000', 380, 52],
+  ['健康保険', 20, 100], ['控除合計', 200, 100], ['振込支給額', 370, 100, 110],
+  ['12,000', 20, 132], ['40,000', 210, 132], ['190,000', 390, 132]
+]);
+const tableResult = parse('2026年9月\n基本給 役職手当 支給合計\n200,000 10,000 230,000\n健康保険 控除合計 振込支給額\n12,000 40,000 190,000', table);
+assert.equal(tableResult.values.basePay, 200000);
+assert.equal(tableResult.values.positionAllowance, 10000);
+assert.equal(tableResult.values.gross, 230000);
+assert.equal(tableResult.values.healthInsurance, 12000);
+assert.equal(tableResult.values.deductions, 40000);
+assert.equal(tableResult.values.net, 190000);
+
+const vertical = parse('', tsv([
+  ['基本給', 20, 20], ['200,000', 250, 20],
+  ['支給合計', 20, 60], ['230,000', 250, 60],
+  ['控除合計', 20, 100], ['40,000', 250, 100],
+  ['振込支給額', 20, 140, 100], ['190,000', 250, 140]
+]));
+assert.equal(vertical.values.basePay, 200000);
+assert.equal(vertical.values.gross, 230000);
+assert.equal(vertical.values.deductions, 40000);
+assert.equal(vertical.values.net, 190000);
+
+// An unreadable amount, two equally plausible columns, or an intervening label stays blank.
+assert.equal(parse('', tsv([['基本給', 20, 20], ['200,000', 20, 52, 80, 5]])).values.basePay, null);
+assert.equal(parse('', tsv([['基本給', 20, 20], ['200,000', 10, 52, 50], ['210,000', 90, 52, 50]])).values.basePay, null);
+assert.equal(parse('', tsv([['基本給', 20, 20], ['役職手当', 20, 50], ['10,000', 20, 80]])).values.basePay, null);
+assert.equal(parse('', 'not a TSV').detected.length, 0);
+assert.equal(parse('').values.net, null);
+assert.ok(parse('').warnings.length);
+
+// Regression from the browser's real Tesseract.js 6 OCR of our synthetic payslip.
+// OCR emits label and amount columns in separate blocks and has no TSV header.
+const browserText = '2026年9月 給与明細\n其本給\n支給合計\n控除合計\n振込支給額\n\n150,000\n159,876\n38,689\n121,187\n';
+const browserTsv = [
+  '1\t1\t0\t0\t0\t0\t0\t0\t1728\t2400\t-1\t',
+  '5\t1\t2\t1\t8\t1\t126\t902\t44\t41\t91.538040\t其',
+  '5\t1\t2\t1\t8\t2\t181\t902\t34\t42\t90.444664\t本',
+  '5\t1\t2\t1\t8\t3\t224\t902\t38\t43\t92.963821\t給',
+  '5\t1\t2\t1\t10\t1\t128\t1190\t88\t43\t95.202370\t支給',
+  '5\t1\t2\t1\t10\t2\t237\t1190\t70\t42\t96.843262\t合計',
+  '5\t1\t2\t1\t17\t1\t127\t1862\t89\t42\t95.774651\t控除',
+  '5\t1\t2\t1\t17\t2\t236\t1862\t71\t42\t96.814545\t合計',
+  '5\t1\t2\t1\t18\t1\t127\t1958\t114\t42\t96.563416\t振込',
+  '5\t1\t2\t1\t18\t2\t240\t1954\t68\t64\t72.811707\t支給',
+  '5\t1\t2\t1\t18\t3\t325\t1958\t29\t43\t92.009239\t額',
+  '5\t1\t4\t1\t2\t1\t708\t904\t184\t42\t96.704712\t150,000',
+  '5\t1\t4\t1\t5\t1\t708\t1192\t183\t42\t96.278824\t159,876',
+  '5\t1\t4\t1\t12\t1\t703\t1864\t158\t42\t96.925804\t38,689',
+  '5\t1\t4\t1\t13\t1\t708\t1960\t183\t42\t96.134109\t121,187'
+].join('\n');
+const browserResult = parse(browserText, browserTsv);
+assert.equal(browserResult.values.month, '2026-09');
+assert.equal(browserResult.values.basePay, 150000);
+assert.equal(browserResult.values.gross, 159876);
+assert.equal(browserResult.values.deductions, 38689);
+assert.equal(browserResult.values.net, 121187);
+assert.equal(browserResult.warnings.length, 0);
+assert.equal(parse('其 本 給 150,000').values.basePay, 150000);
+assert.equal(parse('', table.split('\n').slice(1).join('\n')).values.gross, 230000);
+
+console.log('Payroll parser: 60+ assertions passed.');
