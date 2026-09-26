@@ -18,15 +18,19 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
     x.fillStyle='#222';x.font='bold 66px "Hiragino Sans",sans-serif';x.fillText('2027年2月 給与明細',190,440);
     x.font='38px "Hiragino Sans",sans-serif';x.fillText('テスト用・架空の明細',190,530);
     const draw=(y,labels,values)=>{
-     const w=330,start=195;
-     x.strokeStyle='#888';x.lineWidth=2;
+     const w=270,start=195;
+     x.strokeStyle='#559bd3';x.lineWidth=3;
      for(let i=0;i<=labels.length;i++){x.beginPath();x.moveTo(start+i*w,y);x.lineTo(start+i*w,y+210);x.stroke();}
      for(const dy of [0,100,210]){x.beginPath();x.moveTo(start,y+dy);x.lineTo(start+labels.length*w,y+dy);x.stroke();}
-     labels.forEach((label,i)=>{x.fillStyle='#222';x.font='40px "Hiragino Sans",sans-serif';x.fillText(label,start+i*w+20,y+65);x.font='44px sans-serif';x.fillText(values[i].toLocaleString('en-US'),start+i*w+45,y+175);});
+     labels.forEach((label,i)=>{x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';x.fillText(label,start+i*w+14,y+63);x.font='40px sans-serif';x.fillText(values[i].toLocaleString('en-US'),start+i*w+28,y+175);});
     };
     draw(720,['基本給','役職手当','資格手当','普通残業','通勤交通費','支給合計'],[amounts[0],5000,2000,3333,4000,amounts[1]]);
     draw(1100,['健康保険','厚生年金','雇用保険','所得税','住民税','控除合計'],[12000,22000,900,3500,4000,amounts[2]]);
-    draw(1550,['振込支給額','現金支給額'],[amounts[3],0]);
+    // A tall summary cell at the far right, matching the real layout shape.
+    x.strokeStyle='#559bd3';x.lineWidth=3;x.strokeRect(1840,720,370,700);
+    x.beginPath();x.moveTo(1840,850);x.lineTo(2210,850);x.stroke();
+    x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';x.fillText('振込支給額',1880,800);
+    x.font='42px sans-serif';x.fillText(amounts[3].toLocaleString('en-US'),1900,1340);
     x.restore();
     if(variant===2){const g=x.createLinearGradient(0,0,2400,0);g.addColorStop(0,'rgba(30,20,10,.18)');g.addColorStop(1,'rgba(30,20,10,0)');x.fillStyle=g;x.fillRect(0,0,2400,3200);}
     return c.toDataURL('image/jpeg',.88).split(',')[1];

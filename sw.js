@@ -1,5 +1,5 @@
 'use strict';
-const CACHE = 'husband-salary-notebook-v2';
+const CACHE = 'husband-salary-notebook-v3';
 const CORE = ['./','./index.html','./style.css','./app.js','./parser.js','./manifest.webmanifest','./assets/mascot.svg','./assets/apple-touch-icon.png','./assets/icon-192.png','./assets/icon-512.png','./vendor/tesseract.min.js'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(CORE)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('husband-salary-notebook-') && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())));

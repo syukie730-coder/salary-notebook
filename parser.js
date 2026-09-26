@@ -176,7 +176,9 @@
           const top = Math.min.apply(null, parts.map(w => w.top));
           result.push({text:parts.map(w => w.text).join(''),left:left,top:top,width:right-left,
             height:Math.max.apply(null, parts.map(w => w.top + w.height))-top,
-            confidence:Math.min.apply(null, digits.map(w => w.confidence))});
+            // A comma or the leading group may have low confidence even when the
+            // complete printed amount is clear. Use the digit-weighted average.
+            confidence:digits.reduce((sum,w) => sum + Math.max(0,w.confidence),0) / digits.length});
         }
         parts = [];
       }
@@ -186,7 +188,9 @@
         if (previous) {
           const gap = word.left - previous.left - previous.width;
           const charWidth = Math.min(previous.width / previous.text.length, word.width / word.text.length);
-          if (gap > Math.max(3, Math.min(row.height * .55, charWidth * .85))) flush();
+          // iPhone photographs can split a six-digit amount around its comma.
+          // A table-cell gap is much wider than two text heights.
+          if (gap > Math.max(5, Math.min(row.height * 2, charWidth * 3))) flush();
         }
         parts.push(word);
       });
@@ -265,12 +269,13 @@
       const neighbors = allLabels.filter(function (other) { return other !== label && Math.abs(other.top-label.top) < height * .6; });
       const previous = neighbors.filter(function (other) { return other.right <= label.left; }).sort(function (a, b) { return b.right - a.right; })[0];
       const next = neighbors.filter(function (other) { return other.left >= label.right; }).sort(function (a, b) { return a.left - b.left; })[0];
-      const minX = previous ? (previous.right + label.left) / 2 : label.left - height * 1.5;
-      const maxX = next ? (label.right + next.left) / 2 : label.right + height * 2.5;
+      const minX = previous ? (previous.right + label.left) / 2 : label.left - height * (label.key === 'net' ? 5 : 2.5);
+      const maxX = next ? (label.right + next.left) / 2 : label.right + height * (label.key === 'net' ? 10 : 4.5);
+      const verticalReach = label.key === 'net' ? height * 18 : ['gross','deductions'].includes(label.key) ? height * 6 : height * 3.5;
       const below = numeric.filter(function (entry) {
         const word = entry.word;
         const x = word.left + word.width / 2;
-        return word.top >= label.bottom - 2 && word.top - label.bottom <= height * 2.8 && x > minX && x < maxX &&
+        return word.top >= label.bottom - 2 && word.top - label.bottom <= verticalReach && x > minX && x < maxX &&
           !allLabels.some(function (other) {
             return other !== label && other.top >= label.bottom - 2 && other.top < word.top && other.left < maxX && other.right > minX;
           });
@@ -297,5 +302,41 @@
     return { values: values, detected: Object.keys(values).filter(function (key) { return values[key] !== null && values[key] !== ''; }), warnings: warnings };
   }
 
-  return { FIELDS: FIELDS, parse: parse };
+  function reconcile(passes) {
+    const validPasses=(Array.isArray(passes) ? passes : []).filter(p => p && p.values);
+    if (!validPasses.length) return parse('');
+    const values=Object.assign({},validPasses[0].values);
+    const candidates={};
+    ['month'].concat(FIELDS.map(f=>f.key)).forEach(function (key) {
+      candidates[key]=Array.from(new Set(validPasses.map(p=>p.values[key]).filter(v=>v !== null && v !== '')));
+      if ((values[key] === null || values[key] === '') && candidates[key].length) values[key]=candidates[key][0];
+    });
+    // If a first OCR pass kept only the last comma group, prefer a
+    // later complete money candidate. This rule is based on digit structure,
+    // never on a particular salary amount.
+    ['basePay','gross','deductions','net'].forEach(function (key) {
+      if (typeof values[key] === 'number' && Math.abs(values[key]) < 1000) {
+        const complete=candidates[key].find(v=>typeof v === 'number' && Math.abs(v) >= 1000);
+        if (complete !== undefined) values[key]=complete;
+      }
+    });
+    // Payroll totals provide a strong layout-independent check. Consider every
+    // OCR pass and choose an exactly balancing gross/deduction/net combination.
+    const gross=candidates.gross, deductions=candidates.deductions, net=candidates.net;
+    const cash=candidates.cash.length ? candidates.cash : [0];
+    let balanced=null;
+    gross.forEach(g=>deductions.forEach(d=>net.forEach(n=>cash.forEach(c=>{
+      const difference=Math.abs(g-d-n-c);
+      if (difference <= 1 && (!balanced || difference < balanced.difference)) balanced={g,d,n,c,difference};
+    }))));
+    if (balanced) {
+      values.gross=balanced.g; values.deductions=balanced.d; values.net=balanced.n;
+      if (candidates.cash.length) values.cash=balanced.c;
+    }
+    const warnings=Array.from(new Set(validPasses.flatMap(p=>p.warnings || []))).filter(w=>
+      !w.startsWith('読み取れなかった項目') || !values.month || ['basePay','gross','deductions','net'].some(key=>values[key] == null));
+    return {values,detected:Object.keys(values).filter(key=>values[key] !== null && values[key] !== ''),warnings};
+  }
+
+  return { FIELDS: FIELDS, parse: parse, reconcile: reconcile };
 });

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { FIELDS, parse } = require('../parser.js');
+const { FIELDS, parse, reconcile } = require('../parser.js');
 
 function tsv(rows) {
   return 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n' + rows.map((row, i) =>
@@ -138,4 +138,24 @@ const wrapped=parse('',tsv([
 assert.equal(wrapped.values.gross,258900);assert.equal(wrapped.values.deductions,42120);assert.equal(wrapped.values.net,216780);
 assert.equal(parse('',tsv([['基本給',20,20,80],['12',20,55,20],[',',41,55,4],['34',47,55,20]])).values.basePay,null);
 assert.equal(parse('',tsv([['基本給',20,20,80],['230,000',20,55,60],['245,000',100,55,60]])).values.basePay,null);
+const iphoneSplit=parse('',tsv([
+  ['振込支給額',700,20,120],['121',700,250,40,8],[',',755,250,7,0],['187',780,250,40,94]
+]));
+assert.equal(iphoneSplit.values.net,121187);
+const tallTotals=parse('',tsv([
+  ['支給合計',400,20,90],['159,876',400,155,100],
+  ['控除合計',550,20,90],['38,689',550,155,85],
+  ['振込支給額',720,20,120],['121,187',720,360,100]
+]));
+assert.equal(tallTotals.values.gross,159876);assert.equal(tallTotals.values.deductions,38689);assert.equal(tallTotals.values.net,121187);
+const recovered=reconcile([
+  {values:{month:'2026-09',basePay:null,gross:null,deductions:null,net:187,cash:null},warnings:['読み取れなかった項目は空欄です。元の明細を見ながら確認してください。']},
+  {values:{month:'2026-09',basePay:154980,gross:159876,deductions:38689,net:121187,cash:0},warnings:[]}
+]);
+assert.equal(recovered.values.basePay,154980);assert.equal(recovered.values.gross,159876);assert.equal(recovered.values.deductions,38689);assert.equal(recovered.values.net,121187);
+const changingRecovered=reconcile([
+  {values:{month:'2026-10',basePay:null,gross:null,deductions:null,net:650,cash:null},warnings:[]},
+  {values:{month:'2026-10',basePay:268430,gross:301250,deductions:51230,net:250020,cash:0},warnings:[]}
+]);
+assert.equal(changingRecovered.values.basePay,268430);assert.equal(changingRecovered.values.net,250020);
 console.log('Payroll parser: original regressions, wrapped labels, split commas, and 20 changing table amounts passed.');

@@ -2,7 +2,7 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  const { FIELDS, parse } = window.PayrollParser;
+  const { FIELDS, parse, reconcile } = window.PayrollParser;
   const IMPORTANT = ['basePay', 'gross', 'deductions', 'net'];
   const REQUIRED = ['gross', 'deductions', 'net'];
   const DB_NAME = 'husband-salary-notebook-v1';
@@ -90,21 +90,32 @@
     storage.width = storage.height = 1;
     return {canvas, blob};
   }
-  function enhanceForOCR(source) {
+  function enhanceForOCR(source, binary = false) {
     const canvas = document.createElement('canvas');
     canvas.width = source.width; canvas.height = source.height;
     const ctx = canvas.getContext('2d', {willReadFrequently:true});
     ctx.drawImage(source,0,0);
     const image = ctx.getImageData(0,0,canvas.width,canvas.height), p=image.data;
     const histogram = new Uint32Array(256);
-    for (let i=0;i<p.length;i+=4) { const g=Math.round(p[i]*.299+p[i+1]*.587+p[i+2]*.114); p[i]=g; histogram[g]++; }
+    for (let i=0;i<p.length;i+=4) {
+      const r=p[i], g=p[i+1], b=p[i+2];
+      // Printed blue grid lines are common on Japanese payslips. Remove pixels
+      // that are clearly blue while retaining neutral black text and numbers.
+      const blueGrid=b-r>18 && b-g>7 && b>105;
+      const gray=blueGrid ? 255 : Math.round(r*.299+g*.587+b*.114);
+      p[i]=gray; histogram[gray]++;
+    }
     const total=p.length/4;
     let sum=0, low=0, high=255;
     for (let i=0;i<256;i++) { sum+=histogram[i]; if (sum>=total*.01) {low=i;break;} }
     sum=0;
     for (let i=255;i>=0;i--) { sum+=histogram[i]; if (sum>=total*.01) {high=i;break;} }
     const span=Math.max(50,high-low);
-    for (let i=0;i<p.length;i+=4) { const g=Math.max(0,Math.min(255,Math.round((p[i]-low)*255/span))); p[i]=p[i+1]=p[i+2]=g; p[i+3]=255; }
+    const threshold=low+span*.68;
+    for (let i=0;i<p.length;i+=4) {
+      const gray=binary ? (p[i]<threshold ? 0 : 255) : Math.max(0,Math.min(255,Math.round((p[i]-low)*255/span)));
+      p[i]=p[i+1]=p[i+2]=gray; p[i+3]=255;
+    }
     ctx.putImageData(image,0,0);
     return canvas;
   }
@@ -112,7 +123,7 @@
     if (!file || saveBusy) return;
     clearDraft();
     const token = ++run;
-    let worker, canvas, enhanced, timer;
+    let worker, canvas, enhanced, binary, timer;
     show('reading'); $('read-progress').value = 0; $('read-status').textContent = '写真を準備しています…';
     const interrupted = new Promise((_, reject) => {
       cancelOCR = () => reject(new Error('cancelled'));
@@ -138,18 +149,23 @@
       if (token !== run) { await worker.terminate(); throw new Error('cancelled'); }
       await worker.setParameters({tessedit_pageseg_mode:'3', preserve_interword_spaces:'1', user_defined_dpi:'300'});
       const {data} = await worker.recognize(canvas, {rotateAuto:true}, {text:true, tsv:true}); ensureActive();
-      const parsed = parse(data.text, data.tsv);
-      const needsRetry = () => !parsed.values.month || IMPORTANT.some(key => parsed.values[key] == null);
-      for (const mode of ['11', '6']) {
+      const passes = [parse(data.text, data.tsv)];
+      let parsed = reconcile(passes);
+      const needsRetry = () => {
+        const values=parsed.values;
+        const truncated=IMPORTANT.some(key => typeof values[key] === 'number' && Math.abs(values[key]) < 1000);
+        const totalsPresent=['gross','deductions','net'].every(key => typeof values[key] === 'number');
+        const totalsMismatch=totalsPresent && Math.abs(values.gross-values.deductions-values.net-(values.cash || 0)) > 1;
+        return !values.month || IMPORTANT.some(key => values[key] == null) || truncated || totalsMismatch;
+      };
+      for (const [index,mode] of ['11', '6'].entries()) {
         if (!needsRetry()) break;
         $('read-status').textContent = 'もう少しだけ、数字を確かめています…';
         if (!enhanced) enhanced = enhanceForOCR(canvas);
-        const retry = await worker.recognize(enhanced, {tessedit_pageseg_mode:mode,rotateAuto:true}, {text:true, tsv:true}); ensureActive();
-        const extra = parse(retry.data.text, retry.data.tsv);
-        for (const key of ['month', ...FIELDS.map(f => f.key)]) {
-          if (parsed.values[key] == null || parsed.values[key] === '') parsed.values[key] = extra.values[key];
-        }
-        parsed.warnings = [...new Set([...parsed.warnings, ...extra.warnings])].filter(w => !w.startsWith('読み取れなかった項目') || !parsed.values.month || IMPORTANT.some(key => parsed.values[key] == null));
+        if (index === 1 && !binary) binary = enhanceForOCR(canvas, true);
+        const retry = await worker.recognize(index === 0 ? enhanced : binary, {tessedit_pageseg_mode:mode,rotateAuto:true}, {text:true, tsv:true}); ensureActive();
+        passes.push(parse(retry.data.text, retry.data.tsv));
+        parsed = reconcile(passes);
       }
       draft = {id:null, month:parsed.values.month || '', values:parsed.values, image:prepared.blob, warnings:parsed.warnings || []};
       // Do not retain OCR text (which can contain names or addresses) beyond this operation.
@@ -158,7 +174,7 @@
     try { await Promise.race([job(), interrupted]); }
     catch (e) {
       if (token === run) { run++; show('home'); if (e.message !== 'cancelled') tell(errorText(e), true); }
-    } finally { clearTimeout(timer); if (token === run) cancelOCR = null; if (worker) await worker.terminate().catch(() => {}); if (canvas) canvas.width = canvas.height = 1; if (enhanced) enhanced.width = enhanced.height = 1; }
+    } finally { clearTimeout(timer); if (token === run) cancelOCR = null; if (worker) await worker.terminate().catch(() => {}); if (canvas) canvas.width = canvas.height = 1; if (enhanced) enhanced.width = enhanced.height = 1; if (binary) binary.width = binary.height = 1; }
   }
   function fieldMarkup(f, key = false) {
     const value = draft.values[f.key];
