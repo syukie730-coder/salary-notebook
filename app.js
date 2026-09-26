@@ -74,7 +74,9 @@
   async function preparePhoto(file) {
     if (file.size > 70 * 1024 * 1024) throw new Error('写真が大きすぎます。明細をもう一度撮影してください。');
     const img = await loadImage(file);
-    const ratio = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
+    // Safari's Image decoder applies the photograph's EXIF orientation. Retain
+    // more detail for small table cells; the stored photo remains at 2000 px.
+    const ratio = Math.min(1, 3000 / Math.max(img.naturalWidth, img.naturalHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.naturalWidth * ratio); canvas.height = Math.round(img.naturalHeight * ratio);
     const context = canvas.getContext('2d', {willReadFrequently:true});
@@ -88,11 +90,29 @@
     storage.width = storage.height = 1;
     return {canvas, blob};
   }
+  function enhanceForOCR(source) {
+    const canvas = document.createElement('canvas');
+    canvas.width = source.width; canvas.height = source.height;
+    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    ctx.drawImage(source,0,0);
+    const image = ctx.getImageData(0,0,canvas.width,canvas.height), p=image.data;
+    const histogram = new Uint32Array(256);
+    for (let i=0;i<p.length;i+=4) { const g=Math.round(p[i]*.299+p[i+1]*.587+p[i+2]*.114); p[i]=g; histogram[g]++; }
+    const total=p.length/4;
+    let sum=0, low=0, high=255;
+    for (let i=0;i<256;i++) { sum+=histogram[i]; if (sum>=total*.01) {low=i;break;} }
+    sum=0;
+    for (let i=255;i>=0;i--) { sum+=histogram[i]; if (sum>=total*.01) {high=i;break;} }
+    const span=Math.max(50,high-low);
+    for (let i=0;i<p.length;i+=4) { const g=Math.max(0,Math.min(255,Math.round((p[i]-low)*255/span))); p[i]=p[i+1]=p[i+2]=g; p[i+3]=255; }
+    ctx.putImageData(image,0,0);
+    return canvas;
+  }
   async function readPhoto(file) {
     if (!file || saveBusy) return;
     clearDraft();
     const token = ++run;
-    let worker, canvas, timer;
+    let worker, canvas, enhanced, timer;
     show('reading'); $('read-progress').value = 0; $('read-status').textContent = '写真を準備しています…';
     const interrupted = new Promise((_, reject) => {
       cancelOCR = () => reject(new Error('cancelled'));
@@ -117,11 +137,14 @@
       });
       if (token !== run) { await worker.terminate(); throw new Error('cancelled'); }
       await worker.setParameters({tessedit_pageseg_mode:'3', preserve_interword_spaces:'1', user_defined_dpi:'300'});
-      const {data} = await worker.recognize(canvas, {}, {text:true, tsv:true}); ensureActive();
+      const {data} = await worker.recognize(canvas, {rotateAuto:true}, {text:true, tsv:true}); ensureActive();
       const parsed = parse(data.text, data.tsv);
-      if (!parsed.values.month || IMPORTANT.some(key => parsed.values[key] == null)) {
+      const needsRetry = () => !parsed.values.month || IMPORTANT.some(key => parsed.values[key] == null);
+      for (const mode of ['11', '6']) {
+        if (!needsRetry()) break;
         $('read-status').textContent = 'もう少しだけ、数字を確かめています…';
-        const retry = await worker.recognize(canvas, {tessedit_pageseg_mode:'6'}, {text:true, tsv:true}); ensureActive();
+        if (!enhanced) enhanced = enhanceForOCR(canvas);
+        const retry = await worker.recognize(enhanced, {tessedit_pageseg_mode:mode,rotateAuto:true}, {text:true, tsv:true}); ensureActive();
         const extra = parse(retry.data.text, retry.data.tsv);
         for (const key of ['month', ...FIELDS.map(f => f.key)]) {
           if (parsed.values[key] == null || parsed.values[key] === '') parsed.values[key] = extra.values[key];
@@ -135,7 +158,7 @@
     try { await Promise.race([job(), interrupted]); }
     catch (e) {
       if (token === run) { run++; show('home'); if (e.message !== 'cancelled') tell(errorText(e), true); }
-    } finally { clearTimeout(timer); if (token === run) cancelOCR = null; if (worker) await worker.terminate().catch(() => {}); if (canvas) canvas.width = canvas.height = 1; }
+    } finally { clearTimeout(timer); if (token === run) cancelOCR = null; if (worker) await worker.terminate().catch(() => {}); if (canvas) canvas.width = canvas.height = 1; if (enhanced) enhanced.width = enhanced.height = 1; }
   }
   function fieldMarkup(f, key = false) {
     const value = draft.values[f.key];

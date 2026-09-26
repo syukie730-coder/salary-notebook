@@ -115,4 +115,27 @@ assert.equal(browserResult.warnings.length, 0);
 assert.equal(parse('其 本 給 150,000').values.basePay, 150000);
 assert.equal(parse('', table.split('\n').slice(1).join('\n')).values.gross, 230000);
 
-console.log('Payroll parser: 60+ assertions passed.');
+// Fabricated changing amounts: positions, not a known salary or fixed result.
+for (let seed=1;seed<=20;seed++) {
+  const base=230000+seed*791, gross=base+14500, deductions=37000+seed*173, net=gross-deductions;
+  const expected={basePay:base,gross,deductions,net};
+  const cells=[];
+  ['基本給','支給合計','控除合計','振込支給額'].forEach((label,i)=>{
+    const x=20+i*200, key=Object.keys(expected)[i];
+    cells.push([label,x,20,110]);
+    const parts=expected[key].toLocaleString('en-US').split(',');
+    const firstWidth=parts[0].length*10;
+    cells.push([parts[0],x,60,firstWidth],[',',x+firstWidth+1,60,4,0],[parts[1],x+firstWidth+6,60,30]);
+  });
+  const actual=parse('2027年2月',tsv(cells)).values;
+  for(const key of Object.keys(expected)) assert.equal(actual[key],expected[key],`${key} table variant ${seed}`);
+}
+const wrapped=parse('',tsv([
+  ['基本給',20,20,80],['支給',220,20,45],['控除',420,20,45],['振込',620,20,45],
+  ['合計',220,44,45],['合計',420,44,45],['支給額',620,44,70],
+  ['234,567',20,80,80],['258,900',220,80,80],['42,120',420,80,75],['216,780',620,80,80]
+]));
+assert.equal(wrapped.values.gross,258900);assert.equal(wrapped.values.deductions,42120);assert.equal(wrapped.values.net,216780);
+assert.equal(parse('',tsv([['基本給',20,20,80],['12',20,55,20],[',',41,55,4],['34',47,55,20]])).values.basePay,null);
+assert.equal(parse('',tsv([['基本給',20,20,80],['230,000',20,55,60],['245,000',100,55,60]])).values.basePay,null);
+console.log('Payroll parser: original regressions, wrapped labels, split commas, and 20 changing table amounts passed.');

@@ -162,6 +162,64 @@
     });
   }
 
+  // A printed amount may be several OCR words (e.g. "234", ",", "567").
+  // Join only touching numeric fragments on one visual line, never separate cells.
+  function amountWords(rows) {
+    const result = [];
+    rows.forEach(function (row) {
+      let parts = [];
+      function flush() {
+        if (!parts.length) return;
+        const digits = parts.filter(function (w) { return /\d/.test(w.text); });
+        if (digits.length) {
+          const left = parts[0].left, right = Math.max.apply(null, parts.map(w => w.left + w.width));
+          const top = Math.min.apply(null, parts.map(w => w.top));
+          result.push({text:parts.map(w => w.text).join(''),left:left,top:top,width:right-left,
+            height:Math.max.apply(null, parts.map(w => w.top + w.height))-top,
+            confidence:Math.min.apply(null, digits.map(w => w.confidence))});
+        }
+        parts = [];
+      }
+      row.words.forEach(function (word) {
+        if (!/^[¥￥+\-\d,.円日時間h:]+$/i.test(word.text)) { flush(); return; }
+        const previous = parts[parts.length - 1];
+        if (previous) {
+          const gap = word.left - previous.left - previous.width;
+          const charWidth = Math.min(previous.width / previous.text.length, word.width / word.text.length);
+          if (gap > Math.max(3, Math.min(row.height * .55, charWidth * .85))) flush();
+        }
+        parts.push(word);
+      });
+      flush();
+    });
+    return result;
+  }
+
+  function wrappedLabels(rows, existing) {
+    const result = [];
+    // Restrict reconstruction to known labels, with vertical proximity and overlap.
+    // This does not turn arbitrary neighboring text into an amount label.
+    rows.forEach(function (upper, i) {
+      const lower = rows[i + 1];
+      if (!lower || lower.center - upper.center > Math.max(upper.height, lower.height) * 2.5) return;
+      upper.words.forEach(function (start, wi) {
+        for (let count=1; count<=3 && wi+count<=upper.words.length; count++) {
+          const topParts=upper.words.slice(wi,wi+count), prefix=topParts.map(w=>w.text).join('');
+          if (!aliases.some(a => a.label.startsWith(prefix) && a.label !== prefix)) continue;
+          const left=start.left, right=topParts[topParts.length-1].left+topParts[topParts.length-1].width;
+          const bottomParts=lower.words.filter(w => w.left < right+upper.height && w.left+w.width > left-upper.height);
+          for (let j=0; j<bottomParts.length; j++) for (let n=1; n<=3 && j+n<=bottomParts.length; n++) {
+            const parts=bottomParts.slice(j,j+n), label=aliases.find(a => a.label === prefix+parts.map(w=>w.text).join(''));
+            if (!label) continue;
+            const all=topParts.concat(parts), box={key:label.key,left:Math.min(...all.map(w=>w.left)),right:Math.max(...all.map(w=>w.left+w.width)),top:Math.min(...all.map(w=>w.top)),bottom:Math.max(...all.map(w=>w.top+w.height)),row:upper};
+            if (!existing.concat(result).some(l => l.key===box.key && Math.abs(l.left-box.left)<upper.height && Math.abs(l.top-box.top)<upper.height)) result.push(box);
+          }
+        }
+      });
+    });
+    return result;
+  }
+
   function parse(text, tsv) {
     const values = { month: '' };
     FIELDS.forEach(function (field) { values[field.key] = null; });
@@ -188,9 +246,11 @@
     const words = readTsv(tsv);
     const rows = visualRows(words);
     const allLabels = rows.flatMap(function (row) { return row.labels; });
+    allLabels.push(...wrappedLabels(rows, allLabels));
+    const amounts = amountWords(rows);
     allLabels.forEach(function (label) {
       const kind = byKey[label.key].kind;
-      const numeric = words.map(function (word) { return { word: word, value: numberFrom(word.text, kind) }; }).filter(function (entry) { return entry.value !== null && entry.word.confidence >= 20; });
+      const numeric = amounts.map(function (word) { return { word: word, value: numberFrom(word.text, kind) }; }).filter(function (entry) { return entry.value !== null && entry.word.confidence >= 20; });
       const height = label.bottom - label.top;
       const center = (label.left + label.right) / 2;
       const sameRow = numeric.filter(function (entry) {
@@ -202,7 +262,7 @@
       if (sameRow.length === 1) add(label.key, sameRow[0].value, 4);
 
       // Horizontal headers above amounts: stay inside this header's column.
-      const neighbors = label.row.labels.filter(function (other) { return other !== label; });
+      const neighbors = allLabels.filter(function (other) { return other !== label && Math.abs(other.top-label.top) < height * .6; });
       const previous = neighbors.filter(function (other) { return other.right <= label.left; }).sort(function (a, b) { return b.right - a.right; })[0];
       const next = neighbors.filter(function (other) { return other.left >= label.right; }).sort(function (a, b) { return a.left - b.left; })[0];
       const minX = previous ? (previous.right + label.left) / 2 : label.left - height * 1.5;
