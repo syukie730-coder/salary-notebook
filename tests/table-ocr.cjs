@@ -10,6 +10,7 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
   const page=await context.newPage();
   for(const [variant,amounts] of [[0,[154980,159876,38689,121187]],[1,[234567,258900,42120,216780]],[2,[267890,293210,48560,244650]]]){
    await page.goto(origin);await page.waitForFunction(()=>!document.querySelector('#take-photo').disabled);
+   await page.evaluate(()=>{const original=Tesseract.createWorker;window.__fictionalOcrDebug=[];Tesseract.createWorker=async(...args)=>{const worker=await original(...args),recognize=worker.recognize.bind(worker);worker.recognize=async(...call)=>{const result=await recognize(...call);window.__fictionalOcrDebug.push(result.data.text);return result;};return worker;};});
    const png=await page.evaluate(({variant,amounts})=>{
     const c=document.createElement('canvas');c.width=2400;c.height=3200;const x=c.getContext('2d');
     x.fillStyle='#e4e3dd';x.fillRect(0,0,2400,3200);
@@ -24,13 +25,20 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
      for(const dy of [0,100,210]){x.beginPath();x.moveTo(start,y+dy);x.lineTo(start+labels.length*w,y+dy);x.stroke();}
      labels.forEach((label,i)=>{x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';x.fillText(label,start+i*w+14,y+63);x.font='40px sans-serif';x.fillText(values[i].toLocaleString('en-US'),start+i*w+28,y+175);});
     };
-    draw(720,['基本給','役職手当','資格手当','普通残業','通勤交通費','支給合計'],[amounts[0],5000,2000,3333,4000,amounts[1]]);
-    draw(1100,['健康保険','厚生年金','雇用保険','所得税','住民税','控除合計'],[12000,22000,900,3500,4000,amounts[2]]);
-    // A tall summary cell at the far right, matching the real layout shape.
-    x.strokeStyle='#559bd3';x.lineWidth=3;x.strokeRect(1840,720,370,700);
-    x.beginPath();x.moveTo(1840,850);x.lineTo(2210,850);x.stroke();
-    x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';x.fillText('振込支給額',1880,800);
-    x.font='42px sans-serif';x.fillText(amounts[3].toLocaleString('en-US'),1900,1340);
+    draw(720,['基本給','役職手当','資格手当','普通残業','通勤交通費'],[amounts[0],5000,2000,3333,4000]);
+    draw(1100,['健康保険','厚生年金','雇用保険','所得税','住民税'],[12000,22000,900,3500,4000]);
+    // Tall total cells at the far edge. Later variants stack label characters
+    // vertically, like narrow real-world summary columns.
+    const summary=(y,label,value,vertical)=>{
+     x.strokeStyle='#559bd3';x.lineWidth=3;x.strokeRect(1650,y,560,390);
+     x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';
+     if(vertical) Array.from(label).forEach((char,i)=>x.fillText(char,1690,y+55+i*42));
+     else x.fillText(label,1690,y+65);
+     x.font='42px sans-serif';x.fillText(value.toLocaleString('en-US'),1900,y+330);
+    };
+    summary(690,'支給合計',amounts[1],variant===2);
+    summary(1100,'控除合計',amounts[2],variant===2);
+    summary(1510,'振込支給額',amounts[3],variant>0);
     x.restore();
     if(variant===2){const g=x.createLinearGradient(0,0,2400,0);g.addColorStop(0,'rgba(30,20,10,.18)');g.addColorStop(1,'rgba(30,20,10,0)');x.fillStyle=g;x.fillRect(0,0,2400,3200);}
     return c.toDataURL('image/jpeg',.88).split(',')[1];
@@ -40,6 +48,7 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
    await page.locator('#review:not([hidden])').waitFor({timeout:160000});
    const actual=await page.locator('#key-fields input').evaluateAll(inputs=>Object.fromEntries(inputs.map(e=>[e.name,e.value])));
    console.log('Table variant',variant,actual);
+   if(['basePay','gross','deductions','net'].some((key,i)=>actual[key]!==amounts[i].toLocaleString('en-US'))) console.log('Fictional OCR passes',await page.evaluate(()=>window.__fictionalOcrDebug));
    await page.screenshot({path:path.join(out,`table-result-${variant}.png`),fullPage:true,animations:'disabled'});
    for(const [i,key] of ['basePay','gross','deductions','net'].entries()) assert.equal(actual[key],amounts[i].toLocaleString('en-US'),`variant ${variant} ${key}`);
   }

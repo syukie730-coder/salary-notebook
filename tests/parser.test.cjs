@@ -158,4 +158,22 @@ const changingRecovered=reconcile([
   {values:{month:'2026-10',basePay:268430,gross:301250,deductions:51230,net:250020,cash:0},warnings:[]}
 ]);
 assert.equal(changingRecovered.values.basePay,268430);assert.equal(changingRecovered.values.net,250020);
+const realLayoutShapes=parse('',tsv([
+  ['支給台計',400,20,90],['271,430',400,500,90],
+  ['控',700,20,24],['除',700,48,24],['合',700,76,24],['計',700,104,24],['47,210',700,600,80],
+  ['振',1000,20,24],['込',1000,48,24],['支',1000,76,24],['給',1000,104,24],['額',1000,132,24],['224,220',1000,700,90]
+]));
+assert.equal(realLayoutShapes.values.gross,271430);
+assert.equal(realLayoutShapes.values.deductions,47210);
+assert.equal(realLayoutShapes.values.net,224220);
+const candidateRecovery=reconcile([{values:{month:'2027-03',basePay:260000,gross:280000,deductions:52000,net:219000,cash:0},warnings:[],candidates:{
+  gross:[{value:280000},{value:270000}],deductions:[{value:52000},{value:45000}],net:[{value:219000},{value:225000}],cash:[{value:0}]
+}}]);
+assert.equal(candidateRecovery.values.gross,270000);assert.equal(candidateRecovery.values.deductions,45000);assert.equal(candidateRecovery.values.net,225000);
+const unlabeledTotals=reconcile([parse('',tsv([
+  ['基本給',20,20,70],['262,540',20,60,90],['7,500',220,60,70],['283,910',800,300,90],['49,780',800,620,80],['234,130',800,940,90]
+]))]);
+assert.equal(unlabeledTotals.values.basePay,262540);assert.equal(unlabeledTotals.values.gross,283910);assert.equal(unlabeledTotals.values.deductions,49780);assert.equal(unlabeledTotals.values.net,234130);
+const ambiguousUnlabeled=reconcile([{values:{month:'2027-04',gross:null,deductions:null,net:null,cash:null},warnings:[],moneyCandidates:[300000,50000,250000,60000,240000].map(value=>({value}))}]);
+assert.equal(ambiguousUnlabeled.values.gross,null);assert.equal(ambiguousUnlabeled.values.deductions,null);assert.equal(ambiguousUnlabeled.values.net,null);
 console.log('Payroll parser: original regressions, wrapped labels, split commas, and 20 changing table amounts passed.');

@@ -119,6 +119,20 @@
     ctx.putImageData(image,0,0);
     return canvas;
   }
+  function regionForOCR(source, leftRatio, topRatio, widthRatio, heightRatio) {
+    const sx=Math.round(source.width*leftRatio), sy=Math.round(source.height*topRatio);
+    const sw=Math.max(1,Math.min(source.width-sx,Math.round(source.width*widthRatio)));
+    const sh=Math.max(1,Math.min(source.height-sy,Math.round(source.height*heightRatio)));
+    const scale=Math.min(1.7,Math.max(1,2800/Math.max(sw,sh)));
+    const crop=document.createElement('canvas');
+    crop.width=Math.round(sw*scale); crop.height=Math.round(sh*scale);
+    const context=crop.getContext('2d',{willReadFrequently:true});
+    context.fillStyle='#fff'; context.fillRect(0,0,crop.width,crop.height);
+    context.drawImage(source,sx,sy,sw,sh,0,0,crop.width,crop.height);
+    const prepared=enhanceForOCR(crop,true);
+    crop.width=crop.height=1;
+    return prepared;
+  }
   async function readPhoto(file) {
     if (!file || saveBusy) return;
     clearDraft();
@@ -127,7 +141,7 @@
     show('reading'); $('read-progress').value = 0; $('read-status').textContent = '写真を準備しています…';
     const interrupted = new Promise((_, reject) => {
       cancelOCR = () => reject(new Error('cancelled'));
-      timer = setTimeout(() => reject(new Error('読み取りに時間がかかっています。通信を確認して、文字が大きくはっきり写った写真でもう一度お試しください。')), 150000);
+      timer = setTimeout(() => reject(new Error('読み取りに時間がかかっています。通信を確認して、文字が大きくはっきり写った写真でもう一度お試しください。')), 180000);
     });
     const ensureActive = () => { if (token !== run) throw new Error('cancelled'); };
     const job = async () => {
@@ -166,6 +180,22 @@
         const retry = await worker.recognize(index === 0 ? enhanced : binary, {tessedit_pageseg_mode:mode,rotateAuto:true}, {text:true, tsv:true}); ensureActive();
         passes.push(parse(retry.data.text, retry.data.tsv));
         parsed = reconcile(passes);
+        if (index === 0 && enhanced) { enhanced.width=enhanced.height=1; enhanced=null; }
+        if (index === 1 && binary) { binary.width=binary.height=1; binary=null; }
+      }
+      // If tiny totals remain unread, enlarge overlapping page regions. The
+      // regions are generic and contain no coordinates for a particular form.
+      for (const spec of [
+        {box:[.34,0,.66,1],mode:'11'},
+        {box:[0,.34,1,.66],mode:'6'}
+      ]) {
+        if (!needsRetry()) break;
+        $('read-status').textContent = '小さい集計欄を拡大して確かめています…';
+        binary=regionForOCR(canvas,...spec.box);
+        const retry=await worker.recognize(binary,{tessedit_pageseg_mode:spec.mode,rotateAuto:true},{text:true,tsv:true}); ensureActive();
+        passes.push(parse(retry.data.text,retry.data.tsv));
+        parsed=reconcile(passes);
+        binary.width=binary.height=1; binary=null;
       }
       draft = {id:null, month:parsed.values.month || '', values:parsed.values, image:prepared.blob, warnings:parsed.warnings || []};
       // Do not retain OCR text (which can contain names or addresses) beyond this operation.

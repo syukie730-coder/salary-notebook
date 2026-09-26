@@ -224,6 +224,58 @@
     return result;
   }
 
+  function editDistance(a, b) {
+    const row=Array.from({length:b.length+1},(_,i)=>i);
+    for (let i=1;i<=a.length;i++) {
+      let previous=row[0]; row[0]=i;
+      for (let j=1;j<=b.length;j++) {
+        const saved=row[j];
+        row[j]=Math.min(row[j]+1,row[j-1]+1,previous+(a[i-1]===b[j-1] ? 0 : 1));
+        previous=saved;
+      }
+    }
+    return row[b.length];
+  }
+
+  function importantLabelMatch(text) {
+    const cleaned=normalize(text).replace(/[^\u3040-\u30ff\u3400-\u9fff]/g,'').replace(/合(?:言)?[十卜]/g,'合計');
+    if (cleaned.length < 4 || cleaned.length > 7) return null;
+    const choices=aliases.filter(alias => ['gross','deductions','net'].includes(alias.key) && alias.label.length >= 4)
+      .filter(alias => Math.abs(alias.label.length-cleaned.length) <= 1)
+      .map(alias => ({key:alias.key,distance:editDistance(cleaned,alias.label)}))
+      .filter(choice => choice.distance <= 1)
+      .sort((a,b)=>a.distance-b.distance);
+    return choices.length && (!choices[1] || choices[0].distance < choices[1].distance) ? choices[0].key : null;
+  }
+
+  function fuzzyAndStackedLabels(rows, words, existing) {
+    const result=[];
+    function add(key,parts,row) {
+      const box={key,left:Math.min(...parts.map(w=>w.left)),right:Math.max(...parts.map(w=>w.left+w.width)),top:Math.min(...parts.map(w=>w.top)),bottom:Math.max(...parts.map(w=>w.top+w.height)),unitHeight:Math.max(...parts.map(w=>w.height)),row:row || {}};
+      if (!existing.concat(result).some(label => label.key===key && Math.abs(label.left-box.left)<Math.max(8,box.bottom-box.top)*.35 && Math.abs(label.top-box.top)<Math.max(8,box.bottom-box.top)*.35)) result.push(box);
+    }
+    rows.forEach(row => {
+      for (let start=0;start<row.words.length;start++) for (let count=1;count<=4 && start+count<=row.words.length;count++) {
+        const parts=row.words.slice(start,start+count), key=importantLabelMatch(parts.map(w=>w.text).join(''));
+        if (key) add(key,parts,row);
+      }
+    });
+    const targets=aliases.filter(alias => ['gross','deductions','net'].includes(alias.key));
+    const ordered=words.slice().sort((a,b)=>a.top-b.top || a.left-b.left);
+    targets.forEach(target => {
+      function extend(parts,text,last) {
+        if (text===target.label) { add(target.key,parts); return; }
+        if (!target.label.startsWith(text) || parts.length>=6) return;
+        const center=last.left+last.width/2, scale=Math.max(last.height,last.width/Math.max(1,last.text.length));
+        ordered.filter(word => word.top>last.top && word.top-last.top<scale*4 && Math.abs(word.left+word.width/2-center)<scale*2.5 && target.label.startsWith(text+word.text))
+          .sort((a,b)=>(a.top-last.top)+Math.abs(a.left+a.width/2-center)-(b.top-last.top)-Math.abs(b.left+b.width/2-center)).slice(0,4)
+          .forEach(word => extend(parts.concat(word),text+word.text,word));
+      }
+      ordered.filter(word => target.label.startsWith(word.text) && word.text!==target.label).forEach(word => extend([word],word.text,word));
+    });
+    return result;
+  }
+
   function parse(text, tsv) {
     const values = { month: '' };
     FIELDS.forEach(function (field) { values[field.key] = null; });
@@ -251,11 +303,14 @@
     const rows = visualRows(words);
     const allLabels = rows.flatMap(function (row) { return row.labels; });
     allLabels.push(...wrappedLabels(rows, allLabels));
+    allLabels.push(...fuzzyAndStackedLabels(rows, words, allLabels));
     const amounts = amountWords(rows);
+    const moneyCandidates=amounts.map(function (word) { return {value:numberFrom(word.text,'money'),left:word.left,top:word.top,confidence:word.confidence}; })
+      .filter(function (entry) { return entry.value !== null && entry.confidence >= 20; });
     allLabels.forEach(function (label) {
       const kind = byKey[label.key].kind;
       const numeric = amounts.map(function (word) { return { word: word, value: numberFrom(word.text, kind) }; }).filter(function (entry) { return entry.value !== null && entry.word.confidence >= 20; });
-      const height = label.bottom - label.top;
+      const height = label.unitHeight || label.bottom - label.top;
       const center = (label.left + label.right) / 2;
       const sameRow = numeric.filter(function (entry) {
         const word = entry.word;
@@ -269,9 +324,10 @@
       const neighbors = allLabels.filter(function (other) { return other !== label && Math.abs(other.top-label.top) < height * .6; });
       const previous = neighbors.filter(function (other) { return other.right <= label.left; }).sort(function (a, b) { return b.right - a.right; })[0];
       const next = neighbors.filter(function (other) { return other.left >= label.right; }).sort(function (a, b) { return a.left - b.left; })[0];
-      const minX = previous ? (previous.right + label.left) / 2 : label.left - height * (label.key === 'net' ? 5 : 2.5);
-      const maxX = next ? (label.right + next.left) / 2 : label.right + height * (label.key === 'net' ? 10 : 4.5);
-      const verticalReach = label.key === 'net' ? height * 18 : ['gross','deductions'].includes(label.key) ? height * 6 : height * 3.5;
+      const isTotal=['gross','deductions','net'].includes(label.key);
+      const minX = previous ? (previous.right + label.left) / 2 : label.left - height * (isTotal ? 5 : 2.5);
+      const maxX = next ? (label.right + next.left) / 2 : label.right + height * (isTotal ? 18 : 4.5);
+      const verticalReach = isTotal ? Math.max(height * 30, 240) : height * 3.5;
       const below = numeric.filter(function (entry) {
         const word = entry.word;
         const x = word.left + word.width / 2;
@@ -283,6 +339,9 @@
       if (below.length) {
         const nearestRow = below.filter(function (entry) { return Math.abs(entry.word.top - below[0].word.top) < height * 0.6; });
         if (nearestRow.length === 1) add(label.key, nearestRow[0].value, 2);
+        if (isTotal) {
+          below.slice(0,6).forEach(function (entry) { add(label.key, entry.value, 1); });
+        }
       }
     });
     FIELDS.forEach(function (field) {
@@ -299,7 +358,7 @@
     if (['month', 'basePay', 'gross', 'deductions', 'net'].some(function (key) { return values[key] === null || values[key] === ''; })) {
       warnings.push('読み取れなかった項目は空欄です。元の明細を見ながら確認してください。');
     }
-    return { values: values, detected: Object.keys(values).filter(function (key) { return values[key] !== null && values[key] !== ''; }), warnings: warnings };
+    return { values: values, detected: Object.keys(values).filter(function (key) { return values[key] !== null && values[key] !== ''; }), warnings: warnings, candidates: candidates, moneyCandidates: moneyCandidates };
   }
 
   function reconcile(passes) {
@@ -308,7 +367,7 @@
     const values=Object.assign({},validPasses[0].values);
     const candidates={};
     ['month'].concat(FIELDS.map(f=>f.key)).forEach(function (key) {
-      candidates[key]=Array.from(new Set(validPasses.map(p=>p.values[key]).filter(v=>v !== null && v !== '')));
+      candidates[key]=Array.from(new Set(validPasses.flatMap(p=>[p.values[key]].concat((p.candidates?.[key] || []).map(entry=>entry.value))).filter(v=>v !== null && v !== '')));
       if ((values[key] === null || values[key] === '') && candidates[key].length) values[key]=candidates[key][0];
     });
     // If a first OCR pass kept only the last comma group, prefer a
@@ -320,18 +379,22 @@
         if (complete !== undefined) values[key]=complete;
       }
     });
-    // Payroll totals provide a strong layout-independent check. Consider every
-    // OCR pass and choose an exactly balancing gross/deduction/net combination.
-    const gross=candidates.gross, deductions=candidates.deductions, net=candidates.net;
+    // Payroll totals provide a strong layout-independent check. If OCR read the
+    // amounts but missed their tiny labels, use only a unique exact balance
+    // found among amounts that actually appeared in the photograph.
+    const allMoney=Array.from(new Set(validPasses.flatMap(p=>(p.moneyCandidates || []).map(entry=>entry.value)).filter(value=>typeof value==='number' && Math.abs(value)>=1000)));
+    const gross=candidates.gross.length ? candidates.gross : allMoney;
+    const deductions=candidates.deductions.length ? candidates.deductions : allMoney;
+    const net=candidates.net.length ? candidates.net : allMoney;
     const cash=candidates.cash.length ? candidates.cash : [0];
-    let balanced=null;
+    const balanced=[];
     gross.forEach(g=>deductions.forEach(d=>net.forEach(n=>cash.forEach(c=>{
       const difference=Math.abs(g-d-n-c);
-      if (difference <= 1 && (!balanced || difference < balanced.difference)) balanced={g,d,n,c,difference};
+      if (g>=1000 && d>=1000 && n>=1000 && g>n && n>d && difference <= 1 && !balanced.some(choice=>choice.g===g && choice.d===d && choice.n===n && choice.c===c)) balanced.push({g,d,n,c,difference});
     }))));
-    if (balanced) {
-      values.gross=balanced.g; values.deductions=balanced.d; values.net=balanced.n;
-      if (candidates.cash.length) values.cash=balanced.c;
+    if (balanced.length===1) {
+      values.gross=balanced[0].g; values.deductions=balanced[0].d; values.net=balanced[0].n;
+      if (candidates.cash.length) values.cash=balanced[0].c;
     }
     const warnings=Array.from(new Set(validPasses.flatMap(p=>p.warnings || []))).filter(w=>
       !w.startsWith('読み取れなかった項目') || !values.month || ['basePay','gross','deductions','net'].some(key=>values[key] == null));
