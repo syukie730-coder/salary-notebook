@@ -82,6 +82,13 @@
     return value;
   }
 
+  function numericOCRText(text) {
+    let value=normalize(text).replace(/\s/g,'');
+    if (/^[¥￥+\-\d,.円日時間h:]+$/i.test(value)) return value;
+    if (!/\d/.test(value) || !/^[¥￥+\-\d,.円OoIl|SsB]+$/.test(value)) return null;
+    return value.replace(/[Oo]/g,'0').replace(/[Il|]/g,'1').replace(/[Ss]/g,'5').replace(/B/g,'8');
+  }
+
   function readMonth(text) {
     const found = [];
     normalize(text).split(/\r?\n/).forEach(function (line) {
@@ -183,18 +190,44 @@
         parts = [];
       }
       row.words.forEach(function (word) {
-        if (!/^[¥￥+\-\d,.円日時間h:]+$/i.test(word.text)) { flush(); return; }
+        const repaired=numericOCRText(word.text);
+        if (repaired===null) { flush(); return; }
+        const numericWord=Object.assign({},word,{text:repaired});
         const previous = parts[parts.length - 1];
         if (previous) {
-          const gap = word.left - previous.left - previous.width;
-          const charWidth = Math.min(previous.width / previous.text.length, word.width / word.text.length);
+          const gap = numericWord.left - previous.left - previous.width;
+          const charWidth = Math.min(previous.width / previous.text.length, numericWord.width / numericWord.text.length);
           // iPhone photographs can split a six-digit amount around its comma.
           // A table-cell gap is much wider than two text heights.
           if (gap > Math.max(5, Math.min(row.height * 2, charWidth * 3))) flush();
         }
-        parts.push(word);
+        parts.push(numericWord);
       });
       flush();
+    });
+    return result;
+  }
+
+  function splitAmountWords(words, existing) {
+    const parts=words.map(word=>({word,text:numericOCRText(word.text)})).filter(entry=>entry.text!==null && /^[\d,]+$/.test(entry.text));
+    const result=[];
+    parts.forEach(function (entry) {
+      if (!/^\d{1,3},?$/.test(entry.text)) return;
+      const first=entry.word, center=first.top+first.height/2;
+      const following=parts.filter(other=>other.word.left>=first.left+first.width-2 && other.word.left-first.left-first.width<Math.max(first.height*3,first.width) && Math.abs(other.word.top+other.word.height/2-center)<Math.max(first.height,other.word.height)*1.15)
+        .sort((a,b)=>a.word.left-b.word.left).slice(0,3);
+      let joined=entry.text, used=[first];
+      for (const next of following) {
+        const candidate=joined+next.text;
+        if (!/^\d{1,3},?\d{0,3}$/.test(candidate)) break;
+        joined=candidate; used.push(next.word);
+        if (/^\d{1,3},?\d{3}$/.test(joined)) break;
+      }
+      if (!/^\d{1,3},?\d{3}$/.test(joined) || used.length<2) return;
+      const left=Math.min(...used.map(word=>word.left)), right=Math.max(...used.map(word=>word.left+word.width));
+      const top=Math.min(...used.map(word=>word.top)), bottom=Math.max(...used.map(word=>word.top+word.height));
+      if (existing.some(word=>Math.abs(word.left-left)<3 && Math.abs(word.top-top)<3 && numberFrom(word.text,'money')===numberFrom(joined,'money'))) return;
+      result.push({text:joined,left,top,width:right-left,height:bottom-top,confidence:used.reduce((sum,word)=>sum+Math.max(0,word.confidence),0)/used.length});
     });
     return result;
   }
@@ -239,13 +272,15 @@
 
   function importantLabelMatch(text) {
     const cleaned=normalize(text).replace(/[^\u3040-\u30ff\u3400-\u9fff]/g,'').replace(/合(?:言)?[十卜]/g,'合計');
-    if (cleaned.length < 4 || cleaned.length > 7) return null;
-    const choices=aliases.filter(alias => ['gross','deductions','net'].includes(alias.key) && alias.label.length >= 4)
+    if (cleaned.length < 3 || cleaned.length > 7) return null;
+    const choices=aliases.filter(alias => ['basePay','gross','deductions','net'].includes(alias.key) && alias.label.length >= 3)
       .filter(alias => Math.abs(alias.label.length-cleaned.length) <= 1)
       .map(alias => ({key:alias.key,distance:editDistance(cleaned,alias.label)}))
       .filter(choice => choice.distance <= 1)
       .sort((a,b)=>a.distance-b.distance);
-    return choices.length && (!choices[1] || choices[0].distance < choices[1].distance) ? choices[0].key : null;
+    if (!choices.length) return null;
+    const best=choices[0].distance, keys=Array.from(new Set(choices.filter(choice=>choice.distance===best).map(choice=>choice.key)));
+    return keys.length===1 ? keys[0] : null;
   }
 
   function fuzzyAndStackedLabels(rows, words, existing) {
@@ -256,11 +291,15 @@
     }
     rows.forEach(row => {
       for (let start=0;start<row.words.length;start++) for (let count=1;count<=4 && start+count<=row.words.length;count++) {
-        const parts=row.words.slice(start,start+count), key=importantLabelMatch(parts.map(w=>w.text).join(''));
+        const parts=row.words.slice(start,start+count);
+        const left=parts[0].left, right=parts[parts.length-1].left+parts[parts.length-1].width;
+        const top=Math.min(...parts.map(word=>word.top)), bottom=Math.max(...parts.map(word=>word.top+word.height));
+        if (existing.some(label=>label.left<=left+2 && label.right>=right-2 && label.top<=top+2 && label.bottom>=bottom-2)) continue;
+        const key=importantLabelMatch(parts.map(w=>w.text).join(''));
         if (key) add(key,parts,row);
       }
     });
-    const targets=aliases.filter(alias => ['gross','deductions','net'].includes(alias.key));
+    const targets=aliases.filter(alias => ['basePay','gross','deductions','net'].includes(alias.key));
     const ordered=words.slice().sort((a,b)=>a.top-b.top || a.left-b.left);
     targets.forEach(target => {
       function extend(parts,text,last) {
@@ -281,10 +320,10 @@
     FIELDS.forEach(function (field) { values[field.key] = null; });
     const candidates = {};
     const warnings = [];
-    function add(key, value, priority) {
+    function add(key, value, priority, evidence) {
       if (value === null) return;
       if (!candidates[key]) candidates[key] = [];
-      candidates[key].push({ value: value, priority: priority });
+      candidates[key].push(Object.assign({ value: value, priority: priority, spatialScore:0, confidence:0 },evidence || {}));
     }
     const lines = normalize(text).split(/\r?\n/).map(function (line) {
       return line.replace(/([\u3040-\u30ff\u3400-\u9fff])\s+(?=[\u3040-\u30ff\u3400-\u9fff])/g, '$1').trim();
@@ -305,7 +344,10 @@
     allLabels.push(...wrappedLabels(rows, allLabels));
     allLabels.push(...fuzzyAndStackedLabels(rows, words, allLabels));
     const amounts = amountWords(rows);
-    const moneyCandidates=amounts.map(function (word) { return {value:numberFrom(word.text,'money'),left:word.left,top:word.top,confidence:word.confidence}; })
+    amounts.push(...splitAmountWords(words,amounts));
+    const pageBox=words.length ? {left:Math.min(...words.map(word=>word.left)),top:Math.min(...words.map(word=>word.top)),right:Math.max(...words.map(word=>word.left+word.width)),bottom:Math.max(...words.map(word=>word.top+word.height))} : {left:0,top:0,right:1,bottom:1};
+    const pageWidth=Math.max(1,pageBox.right-pageBox.left), pageHeight=Math.max(1,pageBox.bottom-pageBox.top);
+    const moneyCandidates=amounts.map(function (word) { return {value:numberFrom(word.text,'money'),left:word.left,top:word.top,x:(word.left+word.width/2-pageBox.left)/pageWidth,y:(word.top+word.height/2-pageBox.top)/pageHeight,confidence:word.confidence}; })
       .filter(function (entry) { return entry.value !== null && entry.confidence >= 20; });
     allLabels.forEach(function (label) {
       const kind = byKey[label.key].kind;
@@ -318,10 +360,17 @@
         return middle >= label.top - height * 0.2 && middle <= label.bottom + height * 0.2 && word.left >= label.right - 2 && word.left - label.right <= height * 12 &&
           !allLabels.some(function (other) { return other !== label && other.row === label.row && other.left >= label.right && other.left < word.left; });
       }).sort(function (a, b) { return a.word.left - b.word.left; });
-      if (sameRow.length === 1) add(label.key, sameRow[0].value, 4);
+      sameRow.slice(0,4).forEach(function (entry,index) {
+        const gap=Math.max(0,entry.word.left-label.right);
+        add(label.key,entry.value,sameRow.length===1 ? 4 : 2,{source:'same-row',spatialScore:Math.max(0,120-gap/Math.max(1,height)*8-index*12),confidence:entry.word.confidence});
+      });
 
       // Horizontal headers above amounts: stay inside this header's column.
-      const neighbors = allLabels.filter(function (other) { return other !== label && Math.abs(other.top-label.top) < height * .6; });
+      const labelMiddle=(label.top+label.bottom)/2;
+      const neighbors = allLabels.filter(function (other) {
+        const otherHeight=other.unitHeight || other.bottom-other.top;
+        return other !== label && Math.abs((other.top+other.bottom)/2-labelMiddle) < Math.max(height,otherHeight) * 1.4;
+      });
       const previous = neighbors.filter(function (other) { return other.right <= label.left; }).sort(function (a, b) { return b.right - a.right; })[0];
       const next = neighbors.filter(function (other) { return other.left >= label.right; }).sort(function (a, b) { return a.left - b.left; })[0];
       const isTotal=['gross','deductions','net'].includes(label.key);
@@ -335,20 +384,26 @@
           !allLabels.some(function (other) {
             return other !== label && other.top >= label.bottom - 2 && other.top < word.top && other.left < maxX && other.right > minX;
           });
-      }).sort(function (a, b) { return a.word.top - b.word.top || Math.abs(a.word.left + a.word.width / 2 - center) - Math.abs(b.word.left + b.word.width / 2 - center); });
+      }).map(function (entry) {
+        const word=entry.word, x=word.left+word.width/2;
+        const xDistance=Math.abs(x-center)/Math.max(1,height), yDistance=Math.max(0,word.top-label.bottom)/Math.max(1,height);
+        return Object.assign(entry,{spatialScore:Math.max(0,120-xDistance*9-yDistance*2)});
+      }).sort(function (a, b) { return b.spatialScore-a.spatialScore || a.word.top-b.word.top; });
       if (below.length) {
-        const nearestRow = below.filter(function (entry) { return Math.abs(entry.word.top - below[0].word.top) < height * 0.6; });
-        if (nearestRow.length === 1) add(label.key, nearestRow[0].value, 2);
+        const top=Math.min(...below.map(entry=>entry.word.top));
+        const nearestRow = below.filter(function (entry) { return Math.abs(entry.word.top-top) < height * 0.6; });
+        if (nearestRow.length === 1) add(label.key, nearestRow[0].value, 2,{source:'same-column',spatialScore:nearestRow[0].spatialScore+20,confidence:nearestRow[0].word.confidence});
         if (isTotal) {
-          below.slice(0,6).forEach(function (entry) { add(label.key, entry.value, 1); });
+          below.slice(0,8).forEach(function (entry) { add(label.key, entry.value, 1,{source:'total-column',spatialScore:entry.spatialScore,confidence:entry.word.confidence}); });
         }
       }
     });
     FIELDS.forEach(function (field) {
       const entries = candidates[field.key] || [];
       if (!entries.length) return;
-      const best = Math.max.apply(null, entries.map(function (entry) { return entry.priority; }));
-      const options = Array.from(new Set(entries.filter(function (entry) { return entry.priority === best; }).map(function (entry) { return entry.value; })));
+      const rank=entry=>entry.priority*1000+entry.spatialScore+entry.confidence*.1;
+      const best = Math.max.apply(null, entries.map(rank));
+      const options = Array.from(new Set(entries.filter(function (entry) { return Math.abs(rank(entry)-best)<.01; }).map(function (entry) { return entry.value; })));
       if (options.length === 1) values[field.key] = options[0];
       else warnings.push(field.label + 'が複数読み取れました。元の明細で確認してください。');
     });
@@ -365,9 +420,24 @@
     const validPasses=(Array.isArray(passes) ? passes : []).filter(p => p && p.values);
     if (!validPasses.length) return parse('');
     const values=Object.assign({},validPasses[0].values);
-    const candidates={};
+    const candidates={}, details={};
+    function rankedLabelCandidates(key) {
+      const byValue=new Map();
+      validPasses.forEach(function (pass,passIndex) {
+        const entries=(pass.candidates?.[key] || []).slice();
+        if (pass.values[key] !== null && pass.values[key] !== '' && pass.values[key] !== undefined && !entries.some(entry=>entry.value===pass.values[key])) entries.push({value:pass.values[key],priority:3,spatialScore:0,confidence:0});
+        entries.forEach(function (entry) {
+          if (entry.value===null || entry.value==='' || entry.value===undefined) return;
+          const score=(entry.priority || 0)*100+(entry.spatialScore || 0)+(entry.confidence || 0)*.1;
+          const current=byValue.get(entry.value) || {value:entry.value,score:0,passes:new Set(),labeled:true};
+          current.score=Math.max(current.score,score); current.passes.add(passIndex); byValue.set(entry.value,current);
+        });
+      });
+      return Array.from(byValue.values()).map(entry=>Object.assign(entry,{score:entry.score+entry.passes.size*18})).sort((a,b)=>b.score-a.score);
+    }
     ['month'].concat(FIELDS.map(f=>f.key)).forEach(function (key) {
-      candidates[key]=Array.from(new Set(validPasses.flatMap(p=>[p.values[key]].concat((p.candidates?.[key] || []).map(entry=>entry.value))).filter(v=>v !== null && v !== '')));
+      details[key]=rankedLabelCandidates(key);
+      candidates[key]=details[key].map(entry=>entry.value);
       if ((values[key] === null || values[key] === '') && candidates[key].length) values[key]=candidates[key][0];
     });
     // If a first OCR pass kept only the last comma group, prefer a
@@ -379,22 +449,64 @@
         if (complete !== undefined) values[key]=complete;
       }
     });
-    // Payroll totals provide a strong layout-independent check. If OCR read the
-    // amounts but missed their tiny labels, use only a unique exact balance
-    // found among amounts that actually appeared in the photograph.
-    const allMoney=Array.from(new Set(validPasses.flatMap(p=>(p.moneyCandidates || []).map(entry=>entry.value)).filter(value=>typeof value==='number' && Math.abs(value)>=1000)));
-    const gross=candidates.gross.length ? candidates.gross : allMoney;
-    const deductions=candidates.deductions.length ? candidates.deductions : allMoney;
-    const net=candidates.net.length ? candidates.net : allMoney;
-    const cash=candidates.cash.length ? candidates.cash : [0];
+    // Keep every amount seen by OCR available. A weak label association must
+    // not hide a stronger, arithmetically consistent set of totals.
+    const moneyByValue=new Map();
+    validPasses.forEach(function (pass,passIndex) {
+      (pass.moneyCandidates || []).forEach(function (entry) {
+        if (typeof entry.value!=='number' || entry.value<0 || entry.value>999999999) return;
+        const current=moneyByValue.get(entry.value) || {value:entry.value,score:0,passes:new Set(),positions:[]};
+        current.score=Math.max(current.score,20+(entry.confidence || 0)*.25); current.passes.add(passIndex);
+        if (Number.isFinite(entry.x) && Number.isFinite(entry.y)) current.positions.push({passIndex,x:entry.x,y:entry.y});
+        moneyByValue.set(entry.value,current);
+      });
+    });
+    moneyByValue.forEach(entry=>{entry.score+=entry.passes.size*14;});
+    function roleCandidates(key) {
+      const merged=new Map();
+      moneyByValue.forEach(entry=>merged.set(entry.value,{value:entry.value,score:entry.score,labeled:false,positions:entry.positions}));
+      (details[key] || []).forEach(function (entry) {
+        const current=merged.get(entry.value) || {value:entry.value,score:0,labeled:false,positions:[]};
+        current.score=Math.max(current.score,entry.score); current.labeled=true; merged.set(entry.value,current);
+      });
+      return Array.from(merged.values()).sort((a,b)=>b.score-a.score).slice(0,35);
+    }
+    function layoutScore(gross,deductions,net) {
+      let best=0;
+      for (let passIndex=0;passIndex<validPasses.length;passIndex++) {
+        const gp=gross.positions.filter(p=>p.passIndex===passIndex), dp=deductions.positions.filter(p=>p.passIndex===passIndex), np=net.positions.filter(p=>p.passIndex===passIndex);
+        gp.forEach(g=>dp.forEach(d=>np.forEach(n=>{
+          const spread=Math.max(g.x,d.x,n.x)-Math.min(g.x,d.x,n.x);
+          let score=0;
+          if (g.y<d.y && d.y<n.y) score+=spread<.22 ? 95 : 45;
+          if ((g.x+d.x+n.x)/3>.58) score+=18;
+          best=Math.max(best,score);
+        })));
+      }
+      return best;
+    }
+    const gross=roleCandidates('gross'), deductions=roleCandidates('deductions'), net=roleCandidates('net');
+    const cash=(details.cash || []).length ? details.cash.map(entry=>({value:entry.value,score:entry.score})) : [{value:0,score:20}];
     const balanced=[];
     gross.forEach(g=>deductions.forEach(d=>net.forEach(n=>cash.forEach(c=>{
-      const difference=Math.abs(g-d-n-c);
-      if (g>=1000 && d>=1000 && n>=1000 && g>n && n>d && difference <= 1 && !balanced.some(choice=>choice.g===g && choice.d===d && choice.n===n && choice.c===c)) balanced.push({g,d,n,c,difference});
+      if (g.value<0 || d.value<0 || n.value<0 || (typeof values.basePay==='number' && g.value<values.basePay)) return;
+      const difference=Math.abs(g.value-d.value-n.value-c.value);
+      if (difference>1) return;
+      const labeledCount=[g,d,n].filter(entry=>entry.labeled).length;
+      const score=g.score+d.score+n.score+c.score+layoutScore(g,d,n)+labeledCount*20;
+      const id=[g.value,d.value,n.value,c.value].join(':');
+      if (!balanced.some(choice=>choice.id===id)) balanced.push({id,g:g.value,d:d.value,n:n.value,c:c.value,score,labeledCount});
     }))));
-    if (balanced.length===1) {
-      values.gross=balanced[0].g; values.deductions=balanced[0].d; values.net=balanced[0].n;
-      if (candidates.cash.length) values.cash=balanced[0].c;
+    balanced.sort((a,b)=>b.score-a.score);
+    const winner=balanced[0], runnerUp=balanced[1];
+    if (winner && (!runnerUp || winner.score-runnerUp.score>=25)) {
+      values.gross=winner.g; values.deductions=winner.d; values.net=winner.n;
+      if (details.cash.length) values.cash=winner.c;
+    } else {
+      // An unsupported tiny total is more safely shown as unread than as a
+      // confident but unrelated allowance fragment.
+      if (typeof values.gross==='number' && (values.gross<1000 || (typeof values.basePay==='number' && values.gross<values.basePay))) values.gross=null;
+      if (typeof values.net==='number' && values.net<1000) values.net=null;
     }
     const warnings=Array.from(new Set(validPasses.flatMap(p=>p.warnings || []))).filter(w=>
       !w.startsWith('読み取れなかった項目') || !values.month || ['basePay','gross','deductions','net'].some(key=>values[key] == null));
