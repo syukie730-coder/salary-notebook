@@ -14,7 +14,8 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
    const png=await page.evaluate(({variant,amounts})=>{
     const c=document.createElement('canvas');c.width=2400;c.height=3200;const x=c.getContext('2d');
     x.fillStyle='#e4e3dd';x.fillRect(0,0,2400,3200);
-    x.save();x.translate(1200,1300);x.rotate((variant===0?.45:variant===1?.8:-.6)*Math.PI/180);x.translate(-1200,-1300);
+    x.save();x.translate(1200,1300);x.rotate((variant===0?1.1:variant===1?-1.4:1.8)*Math.PI/180);x.translate(-1200,-1300);
+    x.translate(variant===1?45:variant===2?-55:0,variant===1?-35:variant===2?30:0);
     x.fillStyle='#faf9ef';x.fillRect(90,230,2220,2200);
     x.fillStyle='#222';x.font='bold 66px "Hiragino Sans",sans-serif';x.fillText('2027年2月 給与明細',190,440);
     x.font='38px "Hiragino Sans",sans-serif';x.fillText('テスト用・架空の明細',190,530);
@@ -25,7 +26,7 @@ const origin=process.env.TEST_ORIGIN||'http://127.0.0.1:8768/';
      for(const dy of [0,100,210]){x.beginPath();x.moveTo(start,y+dy);x.lineTo(start+labels.length*w,y+dy);x.stroke();}
      labels.forEach((label,i)=>{x.fillStyle='#222';x.font='34px "Hiragino Sans",sans-serif';x.fillText(label,start+i*w+14,y+63);x.font='40px sans-serif';x.fillText(values[i].toLocaleString('en-US'),start+i*w+28,y+175);});
     };
-    draw(720,['基本給','役職手当','資格手当','普通残業','通勤交通費'],[amounts[0],5000,2000,3333,4000]);
+    draw(720,['基本給','役職手当','資格手当','普通残業','通勤交通費'],[amounts[0],500,2000,3333,500]);
     draw(1100,['健康保険','厚生年金','雇用保険','所得税','住民税'],[12000,22000,900,3500,4000]);
     // Tall total cells at the far edge. Later variants stack label characters
     // vertically, like narrow real-world summary columns.

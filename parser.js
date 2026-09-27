@@ -136,6 +136,21 @@
     });
   }
 
+  function pageSizeFromTsv(tsv) {
+    if (typeof tsv!=='string' || !tsv.trim()) return null;
+    const lines=tsv.trim().replace(/^\uFEFF/,'').split(/\r?\n/);
+    const standard=['level','page_num','block_num','par_num','line_num','word_num','left','top','width','height','conf','text'];
+    const header=lines[0].startsWith('level\t') ? lines.shift().split('\t') : standard;
+    const columns=Object.fromEntries(header.map((name,index)=>[name,index]));
+    for (const line of lines) {
+      const cells=line.split('\t');
+      if (Number(cells[columns.level])!==1) continue;
+      const width=Number(cells[columns.width]),height=Number(cells[columns.height]);
+      if (width>0 && height>0) return {width,height};
+    }
+    return null;
+  }
+
   function visualRows(words) {
     const rows = [];
     words.slice().sort(function (a, b) { return a.top + a.height / 2 - b.top - b.height / 2; }).forEach(function (word) {
@@ -345,28 +360,34 @@
     allLabels.push(...fuzzyAndStackedLabels(rows, words, allLabels));
     const amounts = amountWords(rows);
     amounts.push(...splitAmountWords(words,amounts));
+    amounts.forEach((word,index)=>{word.occurrenceId=index;});
     const pageBox=words.length ? {left:Math.min(...words.map(word=>word.left)),top:Math.min(...words.map(word=>word.top)),right:Math.max(...words.map(word=>word.left+word.width)),bottom:Math.max(...words.map(word=>word.top+word.height))} : {left:0,top:0,right:1,bottom:1};
-    const pageWidth=Math.max(1,pageBox.right-pageBox.left), pageHeight=Math.max(1,pageBox.bottom-pageBox.top);
-    const moneyCandidates=amounts.map(function (word) { return {value:numberFrom(word.text,'money'),left:word.left,top:word.top,x:(word.left+word.width/2-pageBox.left)/pageWidth,y:(word.top+word.height/2-pageBox.top)/pageHeight,confidence:word.confidence}; })
+    const pageSize=pageSizeFromTsv(tsv), pageWidth=pageSize?.width || Math.max(1,pageBox.right-pageBox.left), pageHeight=pageSize?.height || Math.max(1,pageBox.bottom-pageBox.top);
+    const pageLeft=pageSize ? 0 : pageBox.left, pageTop=pageSize ? 0 : pageBox.top;
+    const moneyCandidates=amounts.map(function (word) { return {value:numberFrom(word.text,'money'),occurrenceId:word.occurrenceId,left:word.left,top:word.top,x:(word.left+word.width/2-pageLeft)/pageWidth,y:(word.top+word.height/2-pageTop)/pageHeight,confidence:word.confidence}; })
       .filter(function (entry) { return entry.value !== null && entry.confidence >= 20; });
     allLabels.forEach(function (label) {
       const kind = byKey[label.key].kind;
       const numeric = amounts.map(function (word) { return { word: word, value: numberFrom(word.text, kind) }; }).filter(function (entry) { return entry.value !== null && entry.word.confidence >= 20; });
       const height = label.unitHeight || label.bottom - label.top;
       const center = (label.left + label.right) / 2;
+      const labelMiddle=(label.top+label.bottom)/2;
       const sameRow = numeric.filter(function (entry) {
         const word = entry.word;
         const middle = word.top + word.height / 2;
-        return middle >= label.top - height * 0.2 && middle <= label.bottom + height * 0.2 && word.left >= label.right - 2 && word.left - label.right <= height * 12 &&
+        const horizontalGap=Math.max(0,word.left-label.right);
+        const verticalGap=Math.abs(middle-labelMiddle);
+        const tiltTolerance=Math.min(height*2.2,height*.45+horizontalGap*.045);
+        return verticalGap<=tiltTolerance && word.left >= label.right - 2 && horizontalGap <= height * 12 &&
           !allLabels.some(function (other) { return other !== label && other.row === label.row && other.left >= label.right && other.left < word.left; });
       }).sort(function (a, b) { return a.word.left - b.word.left; });
       sameRow.slice(0,4).forEach(function (entry,index) {
         const gap=Math.max(0,entry.word.left-label.right);
-        add(label.key,entry.value,sameRow.length===1 ? 4 : 2,{source:'same-row',spatialScore:Math.max(0,120-gap/Math.max(1,height)*8-index*12),confidence:entry.word.confidence});
+        const verticalGap=Math.abs(entry.word.top+entry.word.height/2-labelMiddle);
+        add(label.key,entry.value,sameRow.length===1 ? 4 : 2,{source:'same-row',occurrenceId:entry.word.occurrenceId,spatialScore:Math.max(0,130-gap/Math.max(1,height)*7-verticalGap/Math.max(1,height)*14-index*12),confidence:entry.word.confidence});
       });
 
       // Horizontal headers above amounts: stay inside this header's column.
-      const labelMiddle=(label.top+label.bottom)/2;
       const neighbors = allLabels.filter(function (other) {
         const otherHeight=other.unitHeight || other.bottom-other.top;
         return other !== label && Math.abs((other.top+other.bottom)/2-labelMiddle) < Math.max(height,otherHeight) * 1.4;
@@ -392,9 +413,9 @@
       if (below.length) {
         const top=Math.min(...below.map(entry=>entry.word.top));
         const nearestRow = below.filter(function (entry) { return Math.abs(entry.word.top-top) < height * 0.6; });
-        if (nearestRow.length === 1) add(label.key, nearestRow[0].value, 2,{source:'same-column',spatialScore:nearestRow[0].spatialScore+20,confidence:nearestRow[0].word.confidence});
+        if (nearestRow.length === 1) add(label.key, nearestRow[0].value, 2,{source:'same-column',occurrenceId:nearestRow[0].word.occurrenceId,spatialScore:nearestRow[0].spatialScore+20,confidence:nearestRow[0].word.confidence});
         if (isTotal) {
-          below.slice(0,8).forEach(function (entry) { add(label.key, entry.value, 1,{source:'total-column',spatialScore:entry.spatialScore,confidence:entry.word.confidence}); });
+          below.slice(0,8).forEach(function (entry) { add(label.key, entry.value, 1,{source:'total-column',occurrenceId:entry.word.occurrenceId,spatialScore:entry.spatialScore,confidence:entry.word.confidence}); });
         }
       }
     });
@@ -429,8 +450,11 @@
         entries.forEach(function (entry) {
           if (entry.value===null || entry.value==='' || entry.value===undefined) return;
           const score=(entry.priority || 0)*100+(entry.spatialScore || 0)+(entry.confidence || 0)*.1;
-          const current=byValue.get(entry.value) || {value:entry.value,score:0,passes:new Set(),labeled:true};
-          current.score=Math.max(current.score,score); current.passes.add(passIndex); byValue.set(entry.value,current);
+          const current=byValue.get(entry.value) || {value:entry.value,score:0,passes:new Set(),occurrences:new Set(),labeled:true,direct:false};
+          current.score=Math.max(current.score,score); current.passes.add(passIndex);
+          if (entry.occurrenceId!==undefined) current.occurrences.add(passIndex+':'+entry.occurrenceId);
+          if (entry.source==='same-row') current.direct=true;
+          byValue.set(entry.value,current);
         });
       });
       return Array.from(byValue.values()).map(entry=>Object.assign(entry,{score:entry.score+entry.passes.size*18})).sort((a,b)=>b.score-a.score);
@@ -457,17 +481,17 @@
         if (typeof entry.value!=='number' || entry.value<0 || entry.value>999999999) return;
         const current=moneyByValue.get(entry.value) || {value:entry.value,score:0,passes:new Set(),positions:[]};
         current.score=Math.max(current.score,20+(entry.confidence || 0)*.25); current.passes.add(passIndex);
-        if (Number.isFinite(entry.x) && Number.isFinite(entry.y)) current.positions.push({passIndex,x:entry.x,y:entry.y});
+        if (Number.isFinite(entry.x) && Number.isFinite(entry.y)) current.positions.push({passIndex,occurrenceId:entry.occurrenceId,x:entry.x,y:entry.y});
         moneyByValue.set(entry.value,current);
       });
     });
     moneyByValue.forEach(entry=>{entry.score+=entry.passes.size*14;});
     function roleCandidates(key) {
       const merged=new Map();
-      moneyByValue.forEach(entry=>merged.set(entry.value,{value:entry.value,score:entry.score,labeled:false,positions:entry.positions}));
+      moneyByValue.forEach(entry=>merged.set(entry.value,{value:entry.value,score:entry.score,labeled:false,direct:false,positions:entry.positions}));
       (details[key] || []).forEach(function (entry) {
-        const current=merged.get(entry.value) || {value:entry.value,score:0,labeled:false,positions:[]};
-        current.score=Math.max(current.score,entry.score); current.labeled=true; merged.set(entry.value,current);
+        const current=merged.get(entry.value) || {value:entry.value,score:0,labeled:false,direct:false,positions:[]};
+        current.score=Math.max(current.score,entry.score); current.labeled=true; current.direct=current.direct || entry.direct; merged.set(entry.value,current);
       });
       return Array.from(merged.values()).sort((a,b)=>b.score-a.score).slice(0,35);
     }
@@ -490,6 +514,13 @@
     const balanced=[];
     gross.forEach(g=>deductions.forEach(d=>net.forEach(n=>cash.forEach(c=>{
       if (g.value<0 || d.value<0 || n.value<0 || (typeof values.basePay==='number' && g.value<values.basePay)) return;
+      const frequencies=new Map(); [g.value,d.value,n.value].forEach(value=>frequencies.set(value,(frequencies.get(value)||0)+1));
+      for (const [value,needed] of frequencies) {
+        if (needed<2) continue;
+        const positions=moneyByValue.get(value)?.positions || [];
+        const available=Math.max(0,...validPasses.map((_,passIndex)=>new Set(positions.filter(position=>position.passIndex===passIndex).map(position=>position.occurrenceId)).size));
+        if (available<needed) return;
+      }
       const difference=Math.abs(g.value-d.value-n.value-c.value);
       if (difference>1) return;
       const labeledCount=[g,d,n].filter(entry=>entry.labeled).length;
@@ -503,8 +534,12 @@
       values.gross=winner.g; values.deductions=winner.d; values.net=winner.n;
       if (details.cash.length) values.cash=winner.c;
     } else {
-      // An unsupported tiny total is more safely shown as unread than as a
-      // confident but unrelated allowance fragment.
+      // Without a consistent whole-document assignment, retain only a direct
+      // same-row reading. Broad below-column guesses are safer as unread.
+      ['gross','deductions','net'].forEach(function (key) {
+        const selected=(details[key] || []).find(entry=>entry.value===values[key]);
+        if (!selected?.direct) values[key]=null;
+      });
       if (typeof values.gross==='number' && (values.gross<1000 || (typeof values.basePay==='number' && values.gross<values.basePay))) values.gross=null;
       if (typeof values.net==='number' && values.net<1000) values.net=null;
     }
